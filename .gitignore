@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+
+# Secrets, Credentials & Environment (NEVER commit!)
+credentials.json
+*credentials*.json
+credientials.json
+token.json
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local database & logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Generated flyers (keep folder tracked via .gitkeep)
+generated_flyers/*
+!generated_flyers/.gitkeep
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
