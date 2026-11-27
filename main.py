@@ -10,8 +10,11 @@ import uvicorn
 from shared.config import BASE_URL, COMPANY_INFO, DAY_NAMES, SERVER_HOST, SERVER_PORT
 from shared.database import (
     add_client,
+    add_whatsapp_contact,
     get_all_clients,
     get_all_stock_items,
+    get_in_stock_items,
+    get_recent_flyers,
     get_recent_logs,
     get_summary_stats,
     import_clients_csv,
@@ -25,6 +28,12 @@ from task1_email_automation.scheduler import (
     start_scheduler,
 )
 from task1_email_automation.unsubscribe_server import app as fastapi_app
+from task2_ai_flyer.flyer_generator import generate_flyer_image
+from task2_ai_flyer.social_distributor import (
+    create_group_share_pack,
+    post_to_facebook_page,
+    send_whatsapp_flyer_broadcast,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,6 +139,17 @@ def main() -> None:
     parser.add_argument("--stock", action="store_true", help="List all stock items")
     parser.add_argument("--logs", action="store_true", help="Print campaign summary and email logs")
     parser.add_argument("--serve", action="store_true", help="Run scheduler + FastAPI unsubscribe server")
+    parser.add_argument("--generate-flyer", action="store_true", help="Generate weekly AI promotional flyer PNG")
+    parser.add_argument("--flyer-style", default="Minimal", choices=["Minimal", "Bold", "Fresh"], help="Flyer color style")
+    parser.add_argument(
+        "--layout",
+        default="Auto-Rotate",
+        choices=["Auto-Rotate", "Card List", "2-Column Grid", "Featured Spotlight"],
+        help="Flyer layout format",
+    )
+    parser.add_argument("--theme", default="Weekly paper essentials", help="Campaign theme for AI flyer copy")
+    parser.add_argument("--add-wa-contact", nargs=2, metavar=("NAME", "PHONE"), help="Add opted-in WhatsApp contact")
+    parser.add_argument("--distribute-flyer", action="store_true", help="Distribute latest/new flyer via FB Page, WA Cloud, & Share Pack")
 
     args = parser.parse_args()
 
@@ -162,6 +182,52 @@ def main() -> None:
         cmd_logs()
     elif args.serve:
         cmd_serve()
+    elif args.generate_flyer:
+        init_db()
+        seed_sample_data()
+        items = get_in_stock_items()
+        flyer = generate_flyer_image(
+            stock_items=items,
+            style=args.flyer_style,
+            layout=args.layout,
+            campaign_theme=args.theme,
+        )
+        print(f"Flyer generated: {flyer['image_path']} (Layout: {flyer['layout']}, AI: {flyer['ai_source']})")
+        print(f"Headline: {flyer['headline']}")
+        print(f"Caption:\n{flyer['caption']}")
+    elif args.add_wa_contact:
+        init_db()
+        contact = add_whatsapp_contact(args.add_wa_contact[0], args.add_wa_contact[1], opted_in=True)
+        print(f"Added opted-in WhatsApp contact: {contact['name']} (+{contact['phone_e164']})")
+    elif args.distribute_flyer:
+        init_db()
+        seed_sample_data()
+        recent = get_recent_flyers(limit=1)
+        if recent and Path(recent[0]["image_path"]).exists():
+            flyer = recent[0]
+        else:
+            flyer = generate_flyer_image(
+                stock_items=get_in_stock_items(),
+                style=args.flyer_style,
+                layout=args.layout,
+                campaign_theme=args.theme,
+            )
+        fb_res = post_to_facebook_page(
+            flyer["image_path"], flyer["caption"], flyer_id=flyer.get("id"), dry_run=args.dry_run
+        )
+        wa_res = send_whatsapp_flyer_broadcast(
+            flyer["image_path"], flyer["caption"], flyer_id=flyer.get("id"), dry_run=args.dry_run
+        )
+        pack = create_group_share_pack(
+            flyer["image_path"],
+            flyer["caption"],
+            flyer_id=flyer.get("id"),
+            fb_post_url=fb_res.get("post_url"),
+        )
+        print(f"Facebook Page: {fb_res.get('status')} ({fb_res.get('post_url') or fb_res.get('details')})")
+        print(f"WhatsApp Cloud: {wa_res.get('status')} (sent={wa_res.get('sent', 0)}, failed={wa_res.get('failed', 0)})")
+        print(f"Group Share Pack: {pack['pack_dir']}")
+        print(f"WhatsApp Click-to-Share URL: {pack['wa_share_url']}")
     else:
         parser.print_help()
 

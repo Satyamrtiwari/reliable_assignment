@@ -2,22 +2,46 @@
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 # Project root (parent of shared/)
 BASE_DIR = Path(__file__).resolve().parent.parent
+_DOTENV_VALUES = dotenv_values(BASE_DIR / ".env")
 load_dotenv(BASE_DIR / ".env")
+
+
+def _cfg(key: str, default: str = "") -> str:
+    """Prefer non-empty .env value for app/API settings, else OS env, else default."""
+    if key != "DB_PATH":
+        env_val = (_DOTENV_VALUES.get(key) or "").strip()
+        if env_val:
+            return env_val
+    return os.getenv(key, default)
+
 
 # Database, Credentials & Output Folders
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "marketing.db"))
-CREDENTIALS_FILE = Path(os.getenv("CREDENTIALS_FILE", BASE_DIR / "credentials.json"))
-TOKEN_FILE = Path(os.getenv("TOKEN_FILE", BASE_DIR / "token.json"))
+CREDENTIALS_FILE = Path(_cfg("CREDENTIALS_FILE", str(BASE_DIR / "credentials.json")))
+TOKEN_FILE = Path(_cfg("TOKEN_FILE", str(BASE_DIR / "token.json")))
 TEMPLATES_DIR = BASE_DIR / "task1_email_automation" / "templates"
 GENERATED_FLYERS_DIR = BASE_DIR / "generated_flyers"
 DATA_DIR = BASE_DIR / "data"
 
 # Gmail API Configuration (least-privilege scope)
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+
+# Task 2: Groq AI Configuration (Free tier at console.groq.com)
+GROQ_API_KEY = _cfg("GROQ_API_KEY", "")
+GROQ_MODEL = _cfg("GROQ_MODEL", "openai/gpt-oss-120b")
+
+# Task 2: Meta Graph API (Facebook Page & WhatsApp Cloud API)
+META_GRAPH_API_VERSION = _cfg("META_GRAPH_API_VERSION", "v21.0")
+FB_PAGE_ID = _cfg("FB_PAGE_ID", "")
+FB_PAGE_ACCESS_TOKEN = _cfg("FB_PAGE_ACCESS_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = _cfg("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_ACCESS_TOKEN = _cfg("WHATSAPP_ACCESS_TOKEN", "")
+TEAM_NOTIFY_EMAIL = _cfg("TEAM_NOTIFY_EMAIL", "")
+SHARE_PACKS_DIR = GENERATED_FLYERS_DIR / "share_packs"
 
 # Sending Limits & Compliance
 # Free Gmail: ~500/day; Google Workspace: ~2000/day.

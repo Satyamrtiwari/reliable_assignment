@@ -4,6 +4,7 @@ from datetime import datetime
 import html
 from pathlib import Path
 import tempfile
+from urllib.parse import quote
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -14,28 +15,46 @@ from shared.config import (
     CREDENTIALS_FILE,
     DAILY_SEND_LIMIT,
     DAY_NAMES,
+    FB_PAGE_ACCESS_TOKEN,
+    FB_PAGE_ID,
+    GROQ_API_KEY,
     SCHEDULE_HOUR,
     SCHEDULE_MINUTE,
     SEND_DELAY_SECONDS,
+    TEAM_NOTIFY_EMAIL,
     TOKEN_FILE,
+    WHATSAPP_ACCESS_TOKEN,
+    WHATSAPP_PHONE_NUMBER_ID,
 )
 from shared.database import (
     add_client,
     add_or_update_stock_item,
+    add_whatsapp_contact,
     count_sent_today,
     get_all_clients,
     get_all_stock_items,
     get_current_week_key,
     get_in_stock_items,
+    get_recent_flyers,
     get_recent_logs,
+    get_recent_social_logs,
     get_send_counts_by_recipient,
     get_summary_stats,
+    get_whatsapp_contacts,
     import_clients_csv,
     init_db,
     seed_sample_data,
+    set_whatsapp_opt_in,
 )
 from task1_email_automation.email_template import render_stock_email
 from task1_email_automation.scheduler import run_daily_batch, send_test_stock_email
+from task2_ai_flyer.flyer_generator import LAYOUT_NAMES, STYLE_PALETTES, generate_flyer_image
+from task2_ai_flyer.social_distributor import (
+    create_group_share_pack,
+    notify_team_with_share_pack,
+    post_to_facebook_page,
+    send_whatsapp_flyer_broadcast,
+)
 
 st.set_page_config(
     page_title="Reliable Paper Mart - Marketing Workspace",
@@ -112,9 +131,10 @@ def _inject_workspace_css(p: dict[str, str], is_dark: bool) -> None:
     st.markdown(
         f"""
         <style>
-        .stApp, [data-testid="stAppViewContainer"] {{
+        :root, .stApp, [data-testid="stAppViewContainer"] {{
             background-color: {p['bg']} !important;
             color: {p['text']} !important;
+            color-scheme: {"dark" if is_dark else "light"} !important;
         }}
         [data-testid="stHeader"] {{
             background-color: transparent !important;
@@ -175,22 +195,33 @@ def _inject_workspace_css(p: dict[str, str], is_dark: bool) -> None:
             color: {p['nav_active_fg']} !important;
             font-weight: 700 !important;
         }}
-        /* Main buttons (including Light/Dark pill switcher & form submit buttons) */
+        /* Main buttons (including Light/Dark pill switcher, link buttons & form submit buttons) */
         [data-testid="stMain"] div.stButton > button[kind="secondary"],
-        [data-testid="stMain"] button[data-testid="stBaseButton-secondary"] {{
+        [data-testid="stMain"] button[data-testid="stBaseButton-secondary"],
+        [data-testid="stMain"] [data-testid="stLinkButton"] a,
+        [data-testid="stMain"] a[data-testid^="stBaseLinkButton"] {{
             background-color: {p['card']} !important;
             color: {p['text']} !important;
             border: 1px solid {p['border']} !important;
             border-radius: 10px !important;
-            font-weight: 500 !important;
+            font-weight: 600 !important;
+            text-decoration: none !important;
+        }}
+        [data-testid="stMain"] [data-testid="stLinkButton"] a *,
+        [data-testid="stMain"] a[data-testid^="stBaseLinkButton"] * {{
+            color: {p['text']} !important;
+            -webkit-text-fill-color: {p['text']} !important;
         }}
         [data-testid="stMain"] div.stButton > button[kind="secondary"]:hover,
-        [data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover {{
-            background-color: {p['card_subtle']} !important;
+        [data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover,
+        [data-testid="stMain"] [data-testid="stLinkButton"] a:hover,
+        [data-testid="stMain"] a[data-testid^="stBaseLinkButton"]:hover {{
+            background-color: {p['nav_active_bg']} !important;
             border-color: {p['primary']} !important;
         }}
         [data-testid="stMain"] div.stButton > button[kind="primary"],
         [data-testid="stMain"] div.stFormSubmitButton > button,
+        [data-testid="stMain"] div.stDownloadButton > button,
         [data-testid="stMain"] button[data-testid="stBaseButton-primary"],
         [data-testid="stMain"] button[data-testid="stBaseButton-primaryFormSubmit"] {{
             background-color: {p['primary']} !important;
@@ -203,12 +234,14 @@ def _inject_workspace_css(p: dict[str, str], is_dark: bool) -> None:
         }}
         [data-testid="stMain"] div.stButton > button[kind="primary"] *,
         [data-testid="stMain"] div.stFormSubmitButton > button *,
+        [data-testid="stMain"] div.stDownloadButton > button *,
         [data-testid="stMain"] button[data-testid="stBaseButton-primary"] *,
         [data-testid="stMain"] button[data-testid="stBaseButton-primaryFormSubmit"] * {{
             color: #ffffff !important;
         }}
         [data-testid="stMain"] div.stButton > button[kind="primary"]:hover,
         [data-testid="stMain"] div.stFormSubmitButton > button:hover,
+        [data-testid="stMain"] div.stDownloadButton > button:hover,
         [data-testid="stMain"] button[data-testid="stBaseButton-primary"]:hover,
         [data-testid="stMain"] button[data-testid="stBaseButton-primaryFormSubmit"]:hover {{
             background-color: {p['primary_hover']} !important;
@@ -355,35 +388,72 @@ def _inject_workspace_css(p: dict[str, str], is_dark: bool) -> None:
             font-size: 0.72rem;
             color: {p['muted']};
         }}
-        /* Clean inputs, selects, popovers, radios & forms */
+        /* Clean inputs, textareas, selects, multiselects, popovers, radios & forms */
         [data-testid="stForm"],
         [data-testid="stExpander"],
+        [data-testid="stExpander"] details,
+        [data-testid="stExpanderDetails"],
         [data-testid="stVerticalBlockBorderWrapper"] {{
             background-color: {p['card']} !important;
             border: 1px solid {p['border']} !important;
             border-radius: 14px !important;
         }}
-        [data-baseweb="input"],
-        [data-baseweb="base-input"],
-        [data-baseweb="select"] > div {{
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] summary:hover,
+        [data-testid="stExpander"] summary:focus,
+        [data-testid="stExpander"] summary:focus-visible,
+        [data-testid="stExpander"] summary:active,
+        [data-testid="stExpander"] details[open] > summary {{
             background-color: {p['card_subtle']} !important;
             color: {p['text']} !important;
+            border-radius: 12px !important;
+        }}
+        [data-testid="stExpander"] summary *,
+        [data-testid="stExpander"] summary svg {{
+            background-color: transparent !important;
+            color: {p['text']} !important;
+            fill: {p['text']} !important;
+        }}
+        [data-testid="stMain"] [data-testid="stTextInput"] div,
+        [data-testid="stMain"] [data-testid="stTextArea"] div,
+        [data-testid="stMain"] [data-testid="stNumberInput"] div,
+        [data-testid="stMain"] [data-testid="stSelectbox"] div,
+        [data-testid="stMain"] [data-testid="stMultiSelect"] div {{
+            background-color: {p['card_subtle']} !important;
+            color: {p['text']} !important;
+            border-color: {p['border']} !important;
+        }}
+        [data-testid="stMain"] [data-testid="stTextInput"] [data-baseweb="input"],
+        [data-testid="stMain"] [data-testid="stTextArea"] [data-baseweb="textarea"],
+        [data-testid="stMain"] [data-testid="stNumberInput"] [data-baseweb="input"],
+        [data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="select"] > div {{
             border: 1px solid {p['border']} !important;
             border-radius: 10px !important;
         }}
-        [data-baseweb="input"] input,
-        [data-baseweb="base-input"] input,
-        [data-baseweb="select"] span,
-        [data-baseweb="select"] svg {{
+        [data-testid="stMain"] input,
+        [data-testid="stMain"] textarea,
+        [data-testid="stMain"] [data-baseweb="select"] span,
+        [data-testid="stMain"] [data-baseweb="select"] svg {{
             background-color: transparent !important;
             color: {p['text']} !important;
+            -webkit-text-fill-color: {p['text']} !important;
+            caret-color: {p['text']} !important;
             fill: {p['muted']} !important;
         }}
+        [data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="tag"],
+        [data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="tag"] * {{
+            background-color: {p['primary']} !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+            fill: #ffffff !important;
+        }}
         [data-baseweb="popover"],
+        [data-baseweb="popover"] div,
         [data-baseweb="menu"],
         [role="listbox"] {{
             background-color: {p['card']} !important;
-            border: 1px solid {p['border']} !important;
+            border-color: {p['border']} !important;
             color: {p['text']} !important;
         }}
         [role="option"] {{
@@ -398,12 +468,50 @@ def _inject_workspace_css(p: dict[str, str], is_dark: bool) -> None:
             color: {p['text']} !important;
             border-color: {p['border']} !important;
         }}
-        [data-testid="stRadio"] [role="radiogroup"] label > div:first-child {{
+        [data-testid="stMain"] [data-testid="stRadioOption"] > div:first-of-type > div:first-child,
+        [data-testid="stMain"] [data-testid="stRadio"] [role="radiogroup"] label > div:first-of-type > div:first-child {{
             background-color: {p['card']} !important;
             border: 2px solid {p['muted']} !important;
         }}
-        [data-testid="stRadio"] [role="radiogroup"] label[data-checked="true"] > div:first-child {{
+        [data-testid="stMain"] [data-testid="stRadioOption"] > div:first-of-type > div:first-child > div,
+        [data-testid="stMain"] [data-testid="stRadio"] [role="radiogroup"] label > div:first-of-type > div:first-child > div {{
+            background-color: transparent !important;
+        }}
+        [data-testid="stMain"] [data-selected="true"] > [data-testid="stRadioOption"] > div:first-of-type > div:first-child,
+        [data-testid="stMain"] [data-testid="stRadioOption"][data-selected="true"] > div:first-of-type > div:first-child,
+        [data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked) > div:first-of-type > div:first-child {{
             border-color: {p['primary']} !important;
+            background-color: {p['primary']} !important;
+        }}
+        [data-testid="stMain"] [data-selected="true"] > [data-testid="stRadioOption"] > div:first-of-type > div:first-child > div,
+        [data-testid="stMain"] [data-testid="stRadioOption"][data-selected="true"] > div:first-of-type > div:first-child > div,
+        [data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked) > div:first-of-type > div:first-child > div {{
+            background-color: #ffffff !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label > div:first-of-type:not(:has(> div)) {{
+            background-color: {p['card']} !important;
+            border: 2px solid {p['muted']} !important;
+            border-radius: 5px !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"][data-selected="true"] > label > div:first-of-type:not(:has(> div)),
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label[data-selected="true"] > div:first-of-type:not(:has(> div)),
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label:has(input:checked) > div:first-of-type:not(:has(> div)) {{
+            background-color: {p['primary']} !important;
+            border-color: {p['primary']} !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"] svg {{
+            stroke: #ffffff !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label > div:first-of-type:has(> div) {{
+            background-color: {p['border']} !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"][data-selected="true"] > label > div:first-of-type:has(> div),
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label[data-selected="true"] > div:first-of-type:has(> div),
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label:has(input:checked) > div:first-of-type:has(> div) {{
+            background-color: {p['primary']} !important;
+        }}
+        [data-testid="stMain"] [data-testid="stCheckbox"] > label > div:first-of-type:has(> div) > div {{
+            background-color: #ffffff !important;
         }}
         [data-testid="stFileUploaderDropzone"] {{
             background-color: {p['card_subtle']} !important;
@@ -1071,52 +1179,481 @@ elif current_page == "Email campaigns":
         components.html(_preview_with_theme(preview_html, preview_theme), height=580, scrolling=True)
 
 # ==================================================================
-# PAGE 5: AI FLYER STUDIO (TASK 2 PLACEHOLDER)
+# PAGE 5: AI FLYER STUDIO (TASK 2 - PART 1)
 # ==================================================================
 elif current_page == "AI flyer studio":
-    f_left, f_right = st.columns(2)
+    in_stock_all = get_in_stock_items()
+    all_flyers = get_recent_flyers(limit=500)
+    show_all_flyers = st.session_state.get("show_all_flyers", False)
+    recent_flyers = all_flyers if show_all_flyers else all_flyers[:10]
+
+    ai_badge = (
+        '<span class="rpm-badge rpm-badge-green">Groq AI Connected</span>'
+        if GROQ_API_KEY
+        else '<span class="rpm-badge rpm-badge-amber">Offline Fallback (Set GROQ_API_KEY in .env for AI copy)</span>'
+    )
+    st.markdown(
+        f'<div style="margin-bottom:14px;">{ai_badge}</div>',
+        unsafe_allow_html=True,
+    )
+
+    f_left, f_right = st.columns([1.05, 1])
+
     with f_left:
-        st.markdown(
-            f"""
-            <div class="rpm-card">
-              <div class="rpm-section-title">Create a weekly promotional flyer</div>
-              <div class="rpm-section-sub">Task 2 will generate AI headlines & accurate stock flyers from inventory.</div>
-              <div style="margin-top:14px; padding:14px; border-radius:10px; background:{pal['card_subtle']}; border:1px solid {pal['border']};">
-                <span class="rpm-badge rpm-badge-amber">Task 2 Pending</span>
-                <p style="margin:8px 0 0 0; font-size:0.86rem; color:{pal['muted']};">
-                  Ready to build next in <code>task2_ai_flyer/</code>: AI marketing copy, template flyer rendering into
-                  <code>generated_flyers/</code>, and compliant WhatsApp &amp; Facebook distribution.
-                </p>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="rpm-section-title">Create a weekly promotional flyer</div>'
+                f'<div class="rpm-section-sub">Groq AI crafts the headline &amp; offer copy; item names and prices come directly from SQLite inventory</div>',
+                unsafe_allow_html=True,
+            )
+
+            campaign_theme = st.text_input(
+                "Campaign Theme",
+                value="Weekly paper essentials",
+                placeholder="e.g., Festive Packaging Deals / Office Paper Restock",
+            )
+            custom_headline = st.text_input(
+                "Promotional Headline (optional — leave blank for AI)",
+                value="",
+                placeholder="Leave blank to let Groq AI write the headline",
+            )
+
+            item_map = {
+                f"{i['item_name']} — Rs. {i['price']:.2f} ({i['unit']})": i
+                for i in in_stock_all
+            }
+            selected_labels = st.multiselect(
+                "Products to include (up to 6 shown on flyer)",
+                options=list(item_map.keys()),
+                default=list(item_map.keys())[:6],
+            )
+            selected_items = [item_map[lbl] for lbl in selected_labels]
+
+            design_style = st.radio(
+                "Color Style",
+                options=list(STYLE_PALETTES.keys()),
+                index=0,
+                horizontal=True,
+            )
+            flyer_layout = st.selectbox(
+                "Flyer Layout",
+                options=["Auto-Rotate"] + list(LAYOUT_NAMES),
+                index=0,
+                help="Auto-Rotate cycles between Card List, 2-Column Grid, and Featured Spotlight on each generation.",
+            )
+
+            if st.button("✨ Generate promotional flyer", type="primary", use_container_width=True):
+                if not selected_items:
+                    _alert_box("warning", "Select at least one in-stock product to generate a flyer.")
+                else:
+                    with st.status("Creating promotional flyer...", expanded=True) as status:
+                        st.write("🧠 Generating headline, offer badge & social caption...")
+                        st.write("🎨 Rendering 1080×1350 PNG flyer with exact inventory prices...")
+                        flyer_res = generate_flyer_image(
+                            stock_items=selected_items,
+                            style=design_style,
+                            layout=flyer_layout,
+                            campaign_theme=campaign_theme.strip() or "Weekly paper essentials",
+                            custom_headline=custom_headline.strip() or None,
+                        )
+                        status.update(label="✅ Flyer generated and saved!", state="complete")
+                    st.session_state["latest_flyer"] = flyer_res
+                    st.session_state["send_feedback"] = (
+                        "success",
+                        f"Generated {flyer_res['layout']} ({design_style}) flyer ({Path(flyer_res['image_path']).name}) via {flyer_res['ai_source']}.",
+                    )
+                    st.rerun()
+
     with f_right:
-        in_stock_sample = get_in_stock_items()[:3]
-        items_html = "".join(
-            f'<div style="background:{pal["card_subtle"]}; border:1px solid {pal["border"]}; border-radius:10px; padding:10px 14px; margin-bottom:8px;">'
-            f'<div style="font-weight:600; font-size:0.88rem; color:{pal["text"]};">{html.escape(i["item_name"])}</div>'
-            f'<div style="font-size:0.78rem; color:{pal["primary"]}; font-weight:600;">&#8377;{i["price"]:.2f} &bull; {html.escape(i["unit"])}</div>'
-            f"</div>"
-            for i in in_stock_sample
-        )
+        active_flyer = st.session_state.get("latest_flyer") or (all_flyers[0] if all_flyers else None)
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="rpm-section-title">Live flyer preview</div>'
+                f'<div class="rpm-section-sub">Generated PNG ready to verify and download before sharing</div>',
+                unsafe_allow_html=True,
+            )
+            if active_flyer and Path(active_flyer["image_path"]).exists():
+                flyer_file = Path(active_flyer["image_path"])
+                st.caption(
+                    f"Layout: **{active_flyer.get('layout', 'Card List')}** | Style: **{active_flyer['style']}** | "
+                    f"AI: **{active_flyer['ai_source']}** | Items: **{active_flyer['item_count']}**"
+                )
+                st.image(str(flyer_file), use_container_width=True)
+                with open(flyer_file, "rb") as img_fp:
+                    st.download_button(
+                        "⬇️ Download Flyer PNG",
+                        data=img_fp.read(),
+                        file_name=flyer_file.name,
+                        mime="image/png",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                st.text_area(
+                    "Generated Social Caption (WhatsApp / Facebook)",
+                    value=active_flyer["caption"],
+                    height=150,
+                )
+            else:
+                _alert_box("info", "No flyer generated yet. Pick your products and click 'Generate promotional flyer'.")
+
+    if recent_flyers:
+        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
         st.markdown(
-            f"""
-            <div class="rpm-card">
-              <div class="rpm-section-title">Live flyer preview</div>
-              <div class="rpm-section-sub">Sample live inventory items ready for Task 2 flyer generation</div>
-              <div style="background:#1e3a5f; color:#ffffff; padding:18px; border-radius:12px 12px 0 0; margin-top:10px;">
-                <div style="font-size:0.7rem; letter-spacing:0.08em; opacity:0.85;">RELIABLE PAPER MART</div>
-                <div style="font-size:1.25rem; font-weight:700; margin-top:4px;">Stock up. Stay ready.</div>
-              </div>
-              <div style="border:1px solid {pal['border']}; border-top:none; border-radius:0 0 12px 12px; padding:14px;">
-                {items_html}
-              </div>
-            </div>
-            """,
+            f'<div class="rpm-section-title">Recent generated flyers</div>'
+            f'<div class="rpm-section-sub">Showing {len(recent_flyers)} of {len(all_flyers)} generated flyers &bull; Saved inside <code>generated_flyers/</code> and logged in SQLite</div>',
             unsafe_allow_html=True,
         )
+        f_rows = ""
+        for fl in recent_flyers:
+            f_rows += (
+                f"<tr>"
+                f"<td style='color:{pal['muted']}; white-space:nowrap;'>{html.escape(fl['created_at'])}</td>"
+                f"<td><strong>{html.escape(fl['headline'])}</strong></td>"
+                f"<td>{html.escape(fl.get('layout', 'Card List'))}</td>"
+                f"<td>{html.escape(fl['style'])}</td>"
+                f"<td><span class='rpm-badge rpm-badge-neutral'>{html.escape(fl['ai_source'])}</span></td>"
+                f"<td>{fl['item_count']} items</td>"
+                f"<td style='color:{pal['muted']};'>{html.escape(Path(fl['image_path']).name)}</td>"
+                f"</tr>"
+            )
+        st.markdown(
+            f'<div class="rpm-card" style="padding:8px 16px;">'
+            f'<table class="rpm-table"><thead><tr><th>Created</th><th>Headline</th><th>Layout</th><th>Style</th><th>AI Source</th><th>Scope</th><th>File</th></tr></thead>'
+            f"<tbody>{f_rows}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+        if len(all_flyers) > 10:
+            st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+            _, btn_mid, _ = st.columns([1.2, 1, 1.2])
+            with btn_mid:
+                if not show_all_flyers:
+                    remaining = len(all_flyers) - 10
+                    if st.button(
+                        f"More ({remaining} older flyer{'s' if remaining != 1 else ''} — show full history)",
+                        key="flyer_history_more",
+                        use_container_width=True,
+                    ):
+                        st.session_state["show_all_flyers"] = True
+                        st.rerun()
+                else:
+                    if st.button(
+                        "Show less (latest 10 only)",
+                        key="flyer_history_less",
+                        use_container_width=True,
+                    ):
+                        st.session_state["show_all_flyers"] = False
+                        st.rerun()
+
+    # ------------------------------------------------------------------
+    # PART 2: Policy-Compliant Social & WhatsApp Distribution
+    # ------------------------------------------------------------------
+    st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
+
+    if not active_flyer or not Path(active_flyer["image_path"]).exists():
+        _alert_box("info", "Generate a flyer above first to distribute it to Facebook & WhatsApp.")
+    else:
+        fb_ready = bool(FB_PAGE_ID and FB_PAGE_ACCESS_TOKEN)
+        wa_ready = bool(WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN)
+
+        # Facebook Page Distribution Card
+        with st.container(border=True):
+            fb_badge = (
+                f'<span class="rpm-badge rpm-badge-green">Page Connected ({html.escape(FB_PAGE_ID)})</span>'
+                if fb_ready
+                else '<span class="rpm-badge rpm-badge-amber">Dry-Run Mode</span>'
+            )
+            fb_h1, fb_h2, fb_h3 = st.columns([1.6, 0.9, 1.1])
+            with fb_h1:
+                st.markdown(
+                    f'<div class="rpm-section-title" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">'
+                    f'<span>📘 Facebook Page</span>{fb_badge}'
+                    f'</div>'
+                    f'<div class="rpm-section-sub" style="margin-bottom:0;">Auto-publishes the active flyer &amp; caption to your owned Facebook Page</div>',
+                    unsafe_allow_html=True,
+                )
+            with fb_h2:
+                fb_dry = st.checkbox(
+                    "Dry run (preview only)",
+                    value=not fb_ready,
+                    key="fb_dry_run_chk",
+                )
+            with fb_h3:
+                if st.button("Publish to Facebook Page", type="primary", use_container_width=True):
+                    with st.status("Publishing flyer to Facebook Page...", expanded=True) as status:
+                        st.write("📤 Calling Meta Graph API `/photos`...")
+                        fb_res = post_to_facebook_page(
+                            image_path=active_flyer["image_path"],
+                            caption=active_flyer["caption"],
+                            flyer_id=active_flyer.get("id"),
+                            dry_run=fb_dry,
+                        )
+                        if fb_res.get("ok"):
+                            status.update(
+                                label="✅ Facebook Page distribution complete!", state="complete"
+                            )
+                            st.session_state["last_fb_url"] = fb_res.get("post_url")
+                            msg = (
+                                f"Simulated FB Page post ({fb_res['details']})"
+                                if fb_res.get("simulated")
+                                else f"Published to Facebook Page! Post ID: {fb_res.get('external_id')}"
+                            )
+                            st.session_state["send_feedback"] = ("success", msg)
+                            st.rerun()
+                        else:
+                            status.update(label="❌ Facebook publish failed", state="error")
+                            _alert_box("error", f"Facebook API error: {fb_res.get('error')}")
+            if st.session_state.get("last_fb_url"):
+                st.link_button(
+                    "🔗 View Facebook Post",
+                    st.session_state["last_fb_url"],
+                )
+
+        # Approved WhatsApp Distribution Layout
+        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+        wa_badge = (
+            '<span class="rpm-badge rpm-badge-green">● Cloud API Connected</span>'
+            if wa_ready
+            else '<span class="rpm-badge rpm-badge-amber">Dry-Run Mode</span>'
+        )
+        st.markdown(
+            f'<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:4px;">'
+            f'<span style="font-size:1.35rem; font-weight:700; color:{pal["text"]};">WhatsApp Distribution</span>'
+            f'{wa_badge}'
+            f'</div>'
+            f'<div class="rpm-section-sub">1-to-1 Flyers go only to Opted-In contacts; use Share Pack for WhatsApp Groups</div>',
+            unsafe_allow_html=True,
+        )
+
+        wa_left, wa_right = st.columns([1.25, 1])
+
+        # Left Card: Opted-In Contacts (Who Receives Flyers)
+        with wa_left:
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="rpm-section-title" style="margin-bottom:10px;">Opted-In Contacts (Who Receives Flyers)</div>',
+                    unsafe_allow_html=True,
+                )
+                all_wa = get_whatsapp_contacts(opted_in_only=False)
+                if not all_wa:
+                    _alert_box("info", "No WhatsApp contacts saved yet. Add one below.")
+                else:
+                    for idx, wc in enumerate(all_wa):
+                        is_opted = bool(wc["opted_in"])
+                        c_name, c_phone, c_badge, c_tog = st.columns([1.25, 1.35, 0.85, 0.55])
+                        with c_name:
+                            st.markdown(
+                                f'<div style="padding-top:6px; font-weight:600; color:{pal["text"]};">{html.escape(wc["name"])}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        with c_phone:
+                            st.markdown(
+                                f'<div style="padding-top:6px; color:{pal["muted"]}; font-size:0.9rem;">+{html.escape(wc["phone_e164"])}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        with c_badge:
+                            badge_cls = "rpm-badge-green" if is_opted else "rpm-badge-neutral"
+                            badge_txt = "Opted-In" if is_opted else "Opted-Out"
+                            st.markdown(
+                                f'<div style="padding-top:4px;"><span class="rpm-badge {badge_cls}">{badge_txt}</span></div>',
+                                unsafe_allow_html=True,
+                            )
+                        with c_tog:
+                            toggled = st.toggle(
+                                f"Active {wc['name']}",
+                                value=is_opted,
+                                key=f"wa_opt_toggle_{wc['id']}",
+                                label_visibility="collapsed",
+                            )
+                            if toggled != is_opted:
+                                set_whatsapp_opt_in(wc["id"], toggled)
+                                st.rerun()
+                        if idx < len(all_wa) - 1:
+                            st.markdown(
+                                f'<hr style="margin:6px 0; border:none; border-top:1px solid {pal["border"]};">',
+                                unsafe_allow_html=True,
+                            )
+
+                st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+                with st.container(border=True):
+                    st.markdown(
+                        '<div style="font-weight:700; font-size:0.95rem; margin-bottom:8px;">+ Add Contact</div>',
+                        unsafe_allow_html=True,
+                    )
+                    add_c1, add_c2 = st.columns(2)
+                    with add_c1:
+                        wa_name = st.text_input(
+                            "Name",
+                            placeholder="Name",
+                            label_visibility="collapsed",
+                            key="new_wa_name",
+                        )
+                    with add_c2:
+                        wa_phone = st.text_input(
+                            "+91 Phone",
+                            placeholder="+91 Phone (e.g. 919820000000)",
+                            label_visibility="collapsed",
+                            key="new_wa_phone",
+                        )
+                    opt_col, btn_col = st.columns([1.6, 0.7])
+                    with opt_col:
+                        wa_opt_confirm = st.checkbox(
+                            "Opt-in confirmed",
+                            value=True,
+                            key="new_wa_opt_confirmed",
+                        )
+                    with btn_col:
+                        if st.button("Add", type="primary", use_container_width=True, key="add_wa_contact_btn"):
+                            if not wa_phone.strip():
+                                _alert_box("warning", "Enter a phone number with country code.")
+                            else:
+                                try:
+                                    add_whatsapp_contact(
+                                        wa_name.strip() or "Client",
+                                        wa_phone.strip(),
+                                        opted_in=wa_opt_confirm,
+                                    )
+                                    st.session_state["send_feedback"] = (
+                                        "success",
+                                        f"Added {wa_name.strip() or 'Client'} (+{wa_phone.strip().lstrip('+')})",
+                                    )
+                                    st.rerun()
+                                except Exception as exc:
+                                    _alert_box("error", str(exc))
+
+        # Right Card: Send & Share Flyer
+        with wa_right:
+            with st.container(border=True):
+                st.markdown(
+                    '<div class="rpm-section-title" style="margin-bottom:10px;">Send &amp; Share Flyer</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # Sub-card 1: 1-to-1 Cloud API Broadcast
+                with st.container(border=True):
+                    st.markdown(
+                        '<div style="font-weight:700; font-size:0.98rem; margin-bottom:8px;">1-to-1 Cloud API Broadcast</div>',
+                        unsafe_allow_html=True,
+                    )
+                    opted_in_contacts = get_whatsapp_contacts(opted_in_only=True)
+                    n_opted = len(opted_in_contacts)
+                    pill_col, dry_col = st.columns([1.45, 0.85])
+                    with pill_col:
+                        if n_opted > 0:
+                            pill_bg = "rgba(59, 130, 246, 0.16)" if is_dark else "#e0e7ff"
+                            pill_fg = "#93c5fd" if is_dark else "#1d4ed8"
+                            pill_text = f"Will send to {n_opted} opted-in contact{'s' if n_opted != 1 else ''}"
+                        else:
+                            pill_bg = pal["amber_bg"]
+                            pill_fg = pal["amber_fg"]
+                            pill_text = "0 opted-in contacts active"
+                        st.markdown(
+                            f'<span class="rpm-badge" style="background-color:{pill_bg}; color:{pill_fg};">{pill_text}</span>',
+                            unsafe_allow_html=True,
+                        )
+                    with dry_col:
+                        wa_dry = st.toggle(
+                            "Dry Run",
+                            value=not wa_ready,
+                            key="wa_dry_run_chk",
+                        )
+
+                    if st.button(
+                        "Send Flyer to Opted-In Contacts",
+                        type="primary",
+                        use_container_width=True,
+                        key="send_wa_broadcast_btn",
+                    ):
+                        with st.status("Running WhatsApp Cloud API broadcast...", expanded=True) as status:
+                            st.write("📤 Uploading PNG & sending to opted-in contacts...")
+                            wa_res = send_whatsapp_flyer_broadcast(
+                                image_path=active_flyer["image_path"],
+                                caption=active_flyer["caption"],
+                                flyer_id=active_flyer.get("id"),
+                                dry_run=wa_dry,
+                            )
+                            if wa_res["status"] == "NO_RECIPIENTS":
+                                status.update(label="⚠️ No opted-in contacts", state="error")
+                                _alert_box("warning", wa_res["message"])
+                            elif wa_res.get("ok"):
+                                status.update(label="✅ WhatsApp broadcast complete!", state="complete")
+                                st.session_state["send_feedback"] = (
+                                    "success",
+                                    f"WhatsApp ({wa_res['status']}): {wa_res['sent']} sent, {wa_res['failed']} failed.",
+                                )
+                                st.rerun()
+                            else:
+                                status.update(label="❌ WhatsApp send failed", state="error")
+                                _alert_box("error", f"WhatsApp error: {wa_res.get('error', wa_res['status'])}")
+
+                    st.caption("Sandbox note: while using test #, recipient must reply 'Hi' within 24h.")
+
+                # Sub-card 2: WhatsApp Groups (Compliant Share)
+                with st.container(border=True):
+                    st.markdown(
+                        '<div style="font-weight:700; font-size:0.98rem; margin-bottom:8px;">WhatsApp Groups (Compliant Share)</div>',
+                        unsafe_allow_html=True,
+                    )
+                    wa_direct_url = f"https://wa.me/?text={quote(active_flyer['caption'])}"
+                    st.link_button(
+                        "↗ Open WhatsApp (wa.me)",
+                        wa_direct_url,
+                        use_container_width=True,
+                    )
+                    st.markdown(
+                        f'<div style="text-align:center; font-size:0.82rem; color:{pal["muted"]}; margin-top:4px;">'
+                        f'Forward from Cloud API chat (or attach downloaded PNG inside WhatsApp)</div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.expander("Save Share Pack & Email to Staff"):
+                        if st.button("Prepare Group Share Pack", use_container_width=True):
+                            pack = create_group_share_pack(
+                                image_path=active_flyer["image_path"],
+                                caption=active_flyer["caption"],
+                                flyer_id=active_flyer.get("id"),
+                                fb_post_url=st.session_state.get("last_fb_url"),
+                            )
+                            st.session_state["latest_share_pack"] = pack
+                            st.session_state["send_feedback"] = (
+                                "success",
+                                f"Group Share Pack ready in {Path(pack['pack_dir']).name}!",
+                            )
+                            st.rerun()
+
+                        pack_now = st.session_state.get("latest_share_pack")
+                        team_email = st.text_input(
+                            "Email pack to marketing staff",
+                            value=TEAM_NOTIFY_EMAIL,
+                            placeholder="staff@example.com",
+                            key="team_notify_email_input",
+                        )
+                        if st.button("✉️ Email Share Pack", use_container_width=True):
+                            if not team_email.strip():
+                                _alert_box("warning", "Enter a recipient email.")
+                            else:
+                                if not pack_now:
+                                    pack_now = create_group_share_pack(
+                                        image_path=active_flyer["image_path"],
+                                        caption=active_flyer["caption"],
+                                        flyer_id=active_flyer.get("id"),
+                                        fb_post_url=st.session_state.get("last_fb_url"),
+                                    )
+                                    st.session_state["latest_share_pack"] = pack_now
+                                em_res = notify_team_with_share_pack(
+                                    to_email=team_email.strip(),
+                                    image_path=active_flyer["image_path"],
+                                    caption=active_flyer["caption"],
+                                    wa_share_url=pack_now["wa_share_url"],
+                                    fb_post_url=st.session_state.get("last_fb_url"),
+                                    flyer_id=active_flyer.get("id"),
+                                )
+                                if em_res.get("ok"):
+                                    st.session_state["send_feedback"] = (
+                                        "success",
+                                        f"Share pack emailed to {team_email.strip()}!",
+                                    )
+                                    st.rerun()
+                                else:
+                                    _alert_box("error", f"Failed to email pack: {em_res.get('error')}")
 
 # ==================================================================
 # PAGE 6: ACTIVITY LOGS
@@ -1210,6 +1747,40 @@ elif current_page == "Activity logs":
             unsafe_allow_html=True,
         )
 
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="rpm-section-title">Social distribution logs</div>'
+        f'<div class="rpm-section-sub">Audit log for Facebook Page, WhatsApp Cloud API, Group Share Packs &amp; Team notifications</div>',
+        unsafe_allow_html=True,
+    )
+    social_logs = get_recent_social_logs(limit=50)
+    if not social_logs:
+        _alert_box("info", "No social distribution events logged yet.")
+    else:
+        s_rows = ""
+        for sl in social_logs:
+            badge_cls = (
+                "rpm-badge-green"
+                if sl["status"] in ("SUCCESS", "READY")
+                else ("rpm-badge-amber" if sl["status"] == "SIMULATED" else "rpm-badge-red")
+            )
+            s_rows += (
+                f"<tr>"
+                f"<td style='color:{pal['muted']}; white-space:nowrap;'>{html.escape(sl['created_at'])}</td>"
+                f"<td><strong>{html.escape(sl['channel'])}</strong></td>"
+                f"<td>{html.escape(sl['mode'])}</td>"
+                f"<td style='color:{pal['muted']};'>{html.escape(sl['target'])}</td>"
+                f"<td style='color:{pal['muted']};'>{html.escape(sl['details'] or '-')}</td>"
+                f"<td><span class='rpm-badge {badge_cls}'>{html.escape(sl['status'])}</span></td>"
+                f"</tr>"
+            )
+        st.markdown(
+            f'<div class="rpm-card" style="padding:8px 16px;">'
+            f'<table class="rpm-table"><thead><tr><th>Time</th><th>Channel</th><th>Mode</th><th>Target</th><th>Details</th><th>Status</th></tr></thead>'
+            f"<tbody>{s_rows}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
 # ==================================================================
 # PAGE 7: SETTINGS
 # ==================================================================
@@ -1224,6 +1795,21 @@ elif current_page == "Settings":
         if TOKEN_FILE.exists()
         else '<span class="rpm-badge rpm-badge-amber">Pending OAuth</span>'
     )
+    groq_badge = (
+        '<span class="rpm-badge rpm-badge-green">Configured</span>'
+        if GROQ_API_KEY
+        else '<span class="rpm-badge rpm-badge-amber">Offline Fallback</span>'
+    )
+    fb_cfg_badge = (
+        f'<span class="rpm-badge rpm-badge-green">Connected (Page {html.escape(FB_PAGE_ID)})</span>'
+        if (FB_PAGE_ID and FB_PAGE_ACCESS_TOKEN)
+        else '<span class="rpm-badge rpm-badge-amber">Dry-Run Mode</span>'
+    )
+    wa_cfg_badge = (
+        f'<span class="rpm-badge rpm-badge-green">Connected ({html.escape(WHATSAPP_PHONE_NUMBER_ID)})</span>'
+        if (WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN)
+        else '<span class="rpm-badge rpm-badge-amber">Dry-Run Mode</span>'
+    )
     st.markdown(
         f"""
         <div class="rpm-card">
@@ -1234,6 +1820,9 @@ elif current_page == "Settings":
               <tr><td><strong>Company Name</strong></td><td>{html.escape(COMPANY_INFO['name'])}</td></tr>
               <tr><td><strong>Gmail OAuth Credentials</strong></td><td>{cred_badge} &nbsp; <span style="color:{pal['muted']};">{html.escape(CREDENTIALS_FILE.name)}</span></td></tr>
               <tr><td><strong>Gmail User Token</strong></td><td>{tok_badge} &nbsp; <span style="color:{pal['muted']};">{html.escape(TOKEN_FILE.name)}</span></td></tr>
+              <tr><td><strong>Groq AI Copywriter</strong></td><td>{groq_badge}</td></tr>
+              <tr><td><strong>Facebook Page Graph API</strong></td><td>{fb_cfg_badge}</td></tr>
+              <tr><td><strong>WhatsApp Cloud API</strong></td><td>{wa_cfg_badge}</td></tr>
               <tr><td><strong>Daily Send Cap</strong></td><td>{DAILY_SEND_LIMIT} emails/day ({SEND_DELAY_SECONDS}s delay)</td></tr>
               <tr><td><strong>Automatic Schedule</strong></td><td>Monday – Saturday at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} local time</td></tr>
               <tr><td><strong>Unsubscribe Server URL</strong></td><td><code>{html.escape(BASE_URL)}</code> (start via <code>python main.py --serve</code>)</td></tr>

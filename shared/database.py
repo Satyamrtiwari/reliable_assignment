@@ -119,8 +119,52 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_logs_email
                 ON email_logs(client_email);
+
+            CREATE TABLE IF NOT EXISTS flyer_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_key TEXT NOT NULL,
+                style TEXT NOT NULL,
+                layout TEXT NOT NULL DEFAULT 'Card List',
+                campaign_theme TEXT NOT NULL,
+                headline TEXT NOT NULL,
+                offer_text TEXT NOT NULL,
+                caption TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                ai_source TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                phone_e164 TEXT NOT NULL UNIQUE,
+                opted_in INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS social_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                flyer_id INTEGER,
+                channel TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                target TEXT NOT NULL,
+                external_id TEXT,
+                post_url TEXT,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (flyer_id) REFERENCES flyer_logs(id) ON DELETE SET NULL
+            );
             """
         )
+        flyer_cols = {
+            c["name"] for c in conn.execute("PRAGMA table_info(flyer_logs)").fetchall()
+        }
+        if flyer_cols and "layout" not in flyer_cols:
+            conn.execute(
+                "ALTER TABLE flyer_logs ADD COLUMN layout TEXT NOT NULL DEFAULT 'Card List'"
+            )
 
 
 def _local_now_iso() -> str:
@@ -523,3 +567,136 @@ def get_summary_stats() -> dict[str, Any]:
         "test_sent": test_sent,
         "emails_failed": total_failed,
     }
+
+
+def log_flyer_generation(
+    week_key: str,
+    style: str,
+    campaign_theme: str,
+    headline: str,
+    offer_text: str,
+    caption: str,
+    image_path: str,
+    ai_source: str,
+    item_count: int,
+    layout: str = "Card List",
+) -> dict[str, Any]:
+    """Record a generated promotional flyer in flyer_logs."""
+    now = _local_now_iso()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO flyer_logs (
+                week_key, style, layout, campaign_theme, headline, offer_text,
+                caption, image_path, ai_source, item_count, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                week_key,
+                style,
+                layout,
+                campaign_theme,
+                headline,
+                offer_text,
+                caption,
+                image_path,
+                ai_source,
+                item_count,
+                now,
+            ),
+        )
+        row = conn.execute("SELECT * FROM flyer_logs WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+
+def count_generated_flyers() -> int:
+    """Return total number of flyers recorded in flyer_logs."""
+    with get_connection() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM flyer_logs").fetchone()[0])
+
+
+def get_recent_flyers(limit: int = 20) -> list[dict[str, Any]]:
+    """Return recently generated flyers ordered newest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM flyer_logs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_whatsapp_contact(name: str, phone: str, opted_in: bool = True) -> dict[str, Any]:
+    """Insert or update an opted-in WhatsApp contact (digits only, E.164 without '+')."""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits) < 8:
+        raise ValueError("Phone number must contain country code and at least 8 digits (e.g., 919820000000).")
+    now = _local_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO whatsapp_contacts (name, phone_e164, opted_in, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(phone_e164) DO UPDATE SET
+                name = excluded.name,
+                opted_in = excluded.opted_in
+            """,
+            (name.strip(), digits, 1 if opted_in else 0, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM whatsapp_contacts WHERE phone_e164 = ?", (digits,)
+        ).fetchone()
+        return dict(row)
+
+
+def get_whatsapp_contacts(opted_in_only: bool = False) -> list[dict[str, Any]]:
+    """Return WhatsApp contacts ordered newest first."""
+    query = "SELECT * FROM whatsapp_contacts"
+    if opted_in_only:
+        query += " WHERE opted_in = 1"
+    query += " ORDER BY id DESC"
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(query).fetchall()]
+
+
+def set_whatsapp_opt_in(contact_id: int, opted_in: bool) -> None:
+    """Update opt-in consent status for a WhatsApp contact."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE whatsapp_contacts SET opted_in = ? WHERE id = ?",
+            (1 if opted_in else 0, contact_id),
+        )
+
+
+def log_social_distribution(
+    channel: str,
+    mode: str,
+    status: str,
+    target: str,
+    flyer_id: Optional[int] = None,
+    external_id: Optional[str] = None,
+    post_url: Optional[str] = None,
+    details: Optional[str] = None,
+) -> dict[str, Any]:
+    """Record a social distribution event in social_logs."""
+    now = _local_now_iso()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO social_logs (
+                flyer_id, channel, mode, status, target, external_id, post_url, details, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (flyer_id, channel, mode, status, target, external_id, post_url, details, now),
+        )
+        row = conn.execute("SELECT * FROM social_logs WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+
+def get_recent_social_logs(limit: int = 50) -> list[dict[str, Any]]:
+    """Return recent social distribution logs ordered newest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM social_logs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
