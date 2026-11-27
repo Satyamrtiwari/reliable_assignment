@@ -114,6 +114,15 @@ streamlit run dashboard.py
 
 ---
 
+## Demo Video Walkthrough
+
+A full **~4-minute narrated walkthrough** (`reliable_paper_mart_demo.mp4`) is included for reviewers—covering the Light/Dark Streamlit workspace, Customers & Live Inventory, Gmail API stock emails + live Gmail inbox proof, AI Flyer Studio (`1080×1350` PNGs), Facebook Page & WhatsApp Cloud API delivery proof, Activity Logs, and platform compliance rationale.
+
+> **Video Link:** [Watch Demo Video (`reliable_paper_mart_demo.mp4`)](https://github.com/Satyamrtiwari/reliable_assignment#demo-video-walkthrough)  
+> *(To embed an inline video player on GitHub, edit `README.md` on GitHub and drag-and-drop `reliable_paper_mart_demo.mp4` directly into this section, or replace the link above with a Drive/Loom URL.)*
+
+---
+
 ## Running Tests
 ```powershell
 python -m unittest discover -s tests -v
